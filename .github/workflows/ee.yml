@@ -133,6 +133,13 @@ jobs:
           distribution: temurin
           java-version: '11'
 
+      - name: Verify TLS ClientHello fragmentation algorithm
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$FRAGO_PROJECT_DIR"
+          bash tools/verify-fragmenter.sh
+
       - name: Build release APK and verify no Xray/V2Ray payload
         shell: bash
         run: |

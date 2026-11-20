@@ -31,49 +31,91 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_ZIP: ${{ inputs.source_zip }}
+          DEFAULT_SOURCE_ZIP: Frago-Hev-Standalone-Fragment-ARM64-AAR-FIX2.zip
         run: |
           set -euo pipefail
           WORKSPACE="$GITHUB_WORKSPACE"
           EXTRACT_ROOT="$RUNNER_TEMP/frago-source"
+          rm -rf "$EXTRACT_ROOT"
           mkdir -p "$EXTRACT_ROOT"
 
-          if [[ -f "$WORKSPACE/gradlew" && -f "$WORKSPACE/settings.gradle" ]]; then
+          if [[ -f "$WORKSPACE/gradlew" && -f "$WORKSPACE/settings.gradle" && -f "$WORKSPACE/app/build.gradle" ]]; then
             PROJECT_DIR="$WORKSPACE"
-            echo "Found an already-extracted Gradle project at repository root."
+            echo "Found an already-extracted Frago project at repository root."
           else
             ZIP_PATH=""
             if [[ -n "${REQUESTED_SOURCE_ZIP:-}" ]]; then
               ZIP_PATH="$WORKSPACE/$REQUESTED_SOURCE_ZIP"
               [[ -f "$ZIP_PATH" ]] || { echo "Requested source ZIP not found: $ZIP_PATH"; exit 1; }
+            elif [[ -f "$WORKSPACE/$DEFAULT_SOURCE_ZIP" ]]; then
+              ZIP_PATH="$WORKSPACE/$DEFAULT_SOURCE_ZIP"
             else
               mapfile -t VALID_ZIPS < <(
                 while IFS= read -r archive; do
                   if unzip -Z1 "$archive" 2>/dev/null | grep -Eq '(^|/)gradlew$' \
                     && unzip -Z1 "$archive" 2>/dev/null | grep -Eq '(^|/)settings\.gradle$' \
+                    && unzip -Z1 "$archive" 2>/dev/null | grep -Eq '(^|/)app/build\.gradle$' \
                     && unzip -Z1 "$archive" 2>/dev/null | grep -Eq '(^|/)gradle/wrapper/gradle-wrapper\.jar$'; then
                     printf '%s\n' "$archive"
                   fi
                 done < <(find "$WORKSPACE" -maxdepth 4 -type f -iname '*.zip' ! -path '*/.git/*' | sort)
               )
               if [[ ${#VALID_ZIPS[@]} -eq 0 ]]; then
-                echo "No source ZIP containing gradlew, settings.gradle and gradle-wrapper.jar was found."
+                echo "No Frago source ZIP containing gradlew, settings.gradle, app/build.gradle and the wrapper JAR was found."
                 find "$WORKSPACE" -maxdepth 3 -type f | sort | head -200
                 exit 1
               elif [[ ${#VALID_ZIPS[@]} -gt 1 ]]; then
-                echo "More than one Gradle source ZIP was found:"; printf ' - %s\n' "${VALID_ZIPS[@]}"
-                echo "Set workflow_dispatch input source_zip to the exact ZIP path."; exit 1
+                echo "More than one valid source ZIP was found:"
+                printf ' - %s\n' "${VALID_ZIPS[@]}"
+                echo "Set the workflow_dispatch input source_zip to the exact filename."
+                exit 1
               fi
               ZIP_PATH="${VALID_ZIPS[0]}"
             fi
-            echo "Extracting: $ZIP_PATH"
+
+            echo "Extracting source ZIP: $ZIP_PATH"
             unzip -q "$ZIP_PATH" -d "$EXTRACT_ROOT"
-            mapfile -t WRAPPERS < <(find "$EXTRACT_ROOT" -maxdepth 7 -type f -name gradlew -print | sort)
-            [[ ${#WRAPPERS[@]} -eq 1 ]] || { echo "Expected one gradlew, found ${#WRAPPERS[@]}"; exit 1; }
-            PROJECT_DIR="$(dirname "${WRAPPERS[0]}")"
+
+            # A source archive may contain a duplicate backup folder. Do not count
+            # every gradlew: identify complete Android project roots, then prefer
+            # the shallowest (outermost) complete project.
+            PROJECT_DIR="$(python3 - "$EXTRACT_ROOT" <<'PYPROJECT'
+          from pathlib import Path
+          import sys
+          root = Path(sys.argv[1]).resolve()
+          candidates = []
+          for settings in root.rglob('settings.gradle'):
+              d = settings.parent
+              required = [
+                  d / 'gradlew',
+                  d / 'build.gradle',
+                  d / 'app' / 'build.gradle',
+                  d / 'gradle' / 'wrapper' / 'gradle-wrapper.jar',
+              ]
+              if all(p.is_file() for p in required):
+                  candidates.append((len(d.relative_to(root).parts), d))
+          if not candidates:
+              print('No complete Android Gradle project found after extraction.', file=sys.stderr)
+              sys.exit(2)
+          candidates.sort(key=lambda item: (item[0], str(item[1])))
+          shallowest = candidates[0][0]
+          best = [path for depth, path in candidates if depth == shallowest]
+          if len(best) != 1:
+              print('Ambiguous project roots at the same directory depth:', file=sys.stderr)
+              for path in best:
+                  print(f' - {path}', file=sys.stderr)
+              sys.exit(3)
+          print(best[0])
+          PYPROJECT
+          )"
           fi
+
+          [[ -f "$PROJECT_DIR/gradlew" ]] || { echo "gradlew missing: $PROJECT_DIR"; exit 1; }
           [[ -f "$PROJECT_DIR/settings.gradle" ]] || { echo "settings.gradle missing: $PROJECT_DIR"; exit 1; }
+          [[ -f "$PROJECT_DIR/app/build.gradle" ]] || { echo "app/build.gradle missing: $PROJECT_DIR"; exit 1; }
           [[ -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar" ]] || { echo "Wrapper JAR missing: $PROJECT_DIR"; exit 1; }
-          echo "Frago project directory: $PROJECT_DIR"
+          echo "Selected Frago project directory: $PROJECT_DIR"
+          echo "gradlew count in selected project: $(find "$PROJECT_DIR" -maxdepth 1 -type f -name gradlew | wc -l)"
           echo "FRAGO_PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
       - name: Download official Hev Android AAR and extract the real ARM64 JNI library

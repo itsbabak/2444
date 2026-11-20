@@ -21,7 +21,6 @@ jobs:
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
       HEV_VERSION: '2.20.0'
-      HEV_ARM64_SHA256: '88b67182d6db79e880fa9a5aee850cf9ebf094efa56cb42d195ee0308085dd42'
 
     steps:
       - name: Checkout repository (ZIP may be the only source file)
@@ -77,23 +76,61 @@ jobs:
           echo "Frago project directory: $PROJECT_DIR"
           echo "FRAGO_PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
 
-      - name: Download and verify lightweight Hev ARM64 TUN engine
+      - name: Download official Hev Android AAR and extract the real ARM64 JNI library
         shell: bash
         run: |
           set -euo pipefail
           cd "$FRAGO_PROJECT_DIR"
+
+          # IMPORTANT:
+          # The similarly named "hev-socks5-tunnel-android-arm64-v8a" release asset
+          # is a standalone PIE executable, NOT a JNI shared library. Do not rename
+          # that executable to .so. The upstream AAR contains the correct shared object.
+          AAR="$RUNNER_TEMP/hev-socks5-tunnel.aar"
+          URL="https://github.com/heiher/hev-socks5-tunnel/releases/download/${HEV_VERSION}/hev-socks5-tunnel.aar"
+          curl --fail --location --retry 4 --retry-all-errors --connect-timeout 20 "$URL" -o "$AAR"
+
+          ENTRY="jni/arm64-v8a/libhev-socks5-tunnel.so"
+          unzip -Z1 "$AAR" | grep -Fx "$ENTRY" >/dev/null || {
+            echo "Official Hev AAR does not contain expected ARM64 JNI library: $ENTRY"
+            unzip -Z1 "$AAR" | sed -n '1,120p'
+            exit 1
+          }
+
           DEST="app/src/main/jniLibs/arm64-v8a/libhev-socks5-tunnel.so"
           mkdir -p "$(dirname "$DEST")"
-          URL="https://github.com/heiher/hev-socks5-tunnel/releases/download/${HEV_VERSION}/hev-socks5-tunnel-android-arm64-v8a"
-          curl --fail --location --retry 4 --retry-all-errors --connect-timeout 20 "$URL" -o "$DEST"
-          echo "${HEV_ARM64_SHA256}  ${DEST}" | sha256sum --check --status
-          echo "Hev release checksum verified: ${HEV_ARM64_SHA256}"
+          unzip -p "$AAR" "$ENTRY" > "$DEST"
+          test -s "$DEST"
+
+          echo "Downloaded official Hev AAR; AAR SHA-256: $(sha256sum "$AAR" | awk '{print $1}')"
+          echo "Extracted ARM64 JNI shared object: $DEST"
           file "$DEST"
-          readelf -h "$DEST" | grep -E 'Class:|Machine:|Type:'
-          readelf -h "$DEST" | grep -q 'ELF64'
-          readelf -h "$DEST" | grep -q 'AArch64'
-          readelf -Ws "$DEST" | grep -q 'JNI_OnLoad'
-          test "$(stat -c %s "$DEST")" -lt 600000
+
+          # Reject PIE executables: an Android JNI .so must be a shared object
+          # without PT_INTERP, and it must export JNI_OnLoad.
+          file "$DEST" | grep -qi 'shared object' || {
+            echo "Hev payload is not an ELF shared object (it may be the standalone PIE executable)."
+            exit 1
+          }
+          readelf -h "$DEST" > "$RUNNER_TEMP/hev-elf-header.txt"
+          grep -q 'ELF64' "$RUNNER_TEMP/hev-elf-header.txt"
+          grep -q 'AArch64' "$RUNNER_TEMP/hev-elf-header.txt"
+          readelf -l "$DEST" > "$RUNNER_TEMP/hev-elf-program-headers.txt"
+          if grep -q 'INTERP' "$RUNNER_TEMP/hev-elf-program-headers.txt"; then
+            echo "Unexpected PT_INTERP: this is an executable, not a loadable JNI shared library."
+            exit 1
+          fi
+          readelf -Ws "$DEST" > "$RUNNER_TEMP/hev-elf-symbols.txt"
+          grep -q 'JNI_OnLoad' "$RUNNER_TEMP/hev-elf-symbols.txt" || {
+            echo "JNI_OnLoad symbol missing from Hev shared library."
+            exit 1
+          }
+          strings "$DEST" > "$RUNNER_TEMP/hev-strings.txt"
+          grep -Fq 'hev/htproxy/TProxyService' "$RUNNER_TEMP/hev-strings.txt" || {
+            echo "Hev JNI package/class does not match hev.htproxy.TProxyService."
+            exit 1
+          }
+          test "$(stat -c %s "$DEST")" -lt 1200000
 
       - name: Set up JDK 17 for Android SDK tools
         uses: actions/setup-java@v4

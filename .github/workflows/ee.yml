@@ -1,3 +1,35 @@
+name: Build Frago ARM64 from ZIP
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_zip:
+        description: 'Optional ZIP filename/path in the repository (blank = auto-detect)'
+        required: false
+        type: string
+        default: ''
+  push:
+    branches: [ main, master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
+    steps:
+      - name: Checkout repository (ZIP may be the only source file)
+        uses: actions/checkout@v4
+
+      - name: Find and extract Frago source ZIP
+        id: source
+        shell: bash
+        env:
+          REQUESTED_SOURCE_ZIP: ${{ inputs.source_zip }}
         run: |
           set -euo pipefail
           WORKSPACE="$GITHUB_WORKSPACE"

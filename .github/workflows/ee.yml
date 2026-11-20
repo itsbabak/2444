@@ -31,7 +31,7 @@ jobs:
         shell: bash
         env:
           REQUESTED_SOURCE_ZIP: ${{ inputs.source_zip }}
-          DEFAULT_SOURCE_ZIP: Frago-Hev-Standalone-Fragment-ARM64-AAR-FIX2.zip
+          DEFAULT_SOURCE_ZIP: Frago-Hev-Standalone-Fragment-ARM64-AAR-FIX3.zip
         run: |
           set -euo pipefail
           WORKSPACE="$GITHUB_WORKSPACE"
@@ -216,9 +216,32 @@ jobs:
           python3 tools/verify-user-config.py
           bash tools/verify-fragmenter.sh
           bash tools/verify-socks5-tunnel.sh
-          if grep -R -n -E 'libtun2socks|libsystem\.so|loadLibrary\("system"\)' app/src/main app/build.gradle; then
-            echo "Old BadVPN tunnel references remain in source."; exit 1
-          fi
+          # Scan implementation files only. app/build.gradle deliberately contains
+          # forbidden library names for the APK verifier, so scanning it would be
+          # a self-match and fail every clean build.
+          python3 - <<'PYSCAN'
+          from pathlib import Path
+          import sys
+
+          root = Path("app/src/main")
+          suffixes = {".java", ".kt", ".c", ".h", ".cc", ".cpp", ".xml"}
+          markers = ("libtun2socks", "libsystem.so", 'loadLibrary("system")')
+          hits = []
+          for path in root.rglob("*"):
+              if path.is_file() and path.suffix.lower() in suffixes:
+                  try:
+                      content = path.read_text(encoding="utf-8", errors="ignore")
+                  except OSError:
+                      continue
+                  for marker in markers:
+                      if marker in content:
+                          hits.append(f"{path}: {marker}")
+          if hits:
+              print("Legacy BadVPN references found in application source:", file=sys.stderr)
+              print("\n".join(hits), file=sys.stderr)
+              sys.exit(1)
+          print("PASS: no legacy BadVPN references in application source")
+          PYSCAN
 
       - name: Build release APK and verify native payload
         shell: bash
